@@ -464,14 +464,14 @@ class Bot:
                 goal = n["pos"]
                 self.npc_target = n
 
-        # weapon loot: grab a second weapon early, lightning first
+        # weapon loot: the laser is the ranged duel weapon; grab one early
         if me["weapons"][1] is None and obs["pickups"] and not outside:
-            pref = {"lightning": 0, "laser": 1, "mortar": 2}
+            pref = {"laser": 0, "lightning": 1, "mortar": 2}
             cand = [p for p in obs["pickups"] if p["kind"] in pref and self._ground_reach(p["pos"])]
             if cand:
                 cand.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
                 p = cand[0]
-                if dist3(pos, p["pos"]) < 160.0 and (target is None or td > 55.0 or t < 20.0):
+                if dist3(pos, p["pos"]) < 190.0 and (target is None or td > 55.0 or t < 20.0):
                     goal = p["pos"]
                     mode = "loot"
 
@@ -521,17 +521,12 @@ class Bot:
             px, py = -dy * self.strafe, dx * self.strafe
             myk = set(w["kind"] for w in me["weapons"] if w)
             ek = set(target.get("weapons") or [])
-            if "lightning" in myk:
-                if "mortar" in ek:
-                    lo, hi = (55.0, 100.0)
-                elif "lightning" in ek:
-                    lo, hi = (35.0, 70.0)
-                else:
-                    lo, hi = (16.0, 40.0)
-            elif "laser" in myk:
-                lo, hi = (70.0, 150.0) if "lightning" in ek else (60.0, 140.0)
+            if "laser" in myk:
+                lo, hi = (75.0, 160.0)
+            elif "lightning" in myk:
+                lo, hi = (60.0, 120.0)
             else:
-                lo, hi = (28.0, 65.0)
+                lo, hi = (45.0, 90.0)
             t_hp = target.get("hp", 1400.0)
             if t_hp < 320.0 and td > 28.0:
                 # finish the kill
@@ -606,7 +601,10 @@ class Bot:
             move = [move[0] / ml, move[1] / ml]
 
         # ----- aim -----
-        if target:
+        if t < 3.0 and me["weapons"][1] is None and not target:
+            # spin the torso at spawn to spot floor loot in every direction
+            aim = (me["aim"][0] + 0.38, -0.02)
+        elif target:
             tpos = target["pos"]
             scale = 1.0 + 0.05 * (target.get("cubes", 0) or 0)
             center = [tpos[0], tpos[1], tpos[2] + 4.5 * scale]
@@ -690,9 +688,9 @@ class Bot:
         if w0 and w0.get("ammo", 1) <= 1 and w0.get("reload", 0) == 0:
             reload = True
 
-        # weapon pickup / swap: lightning is the anti-laser brawler
+        # weapon pickup / swap: laser first at kiting range
         if obs["pickups"]:
-            pref = {"lightning": 0, "laser": 1, "mortar": 2}
+            pref = {"laser": 0, "lightning": 1, "mortar": 2}
             cand = [p for p in obs["pickups"] if p["kind"] in pref and self._ground_reach(p["pos"])]
             if w1 is None and cand:
                 cand.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
@@ -700,9 +698,9 @@ class Bot:
                 if (dist2(pos, p["pos"]) <= self.loot_cfg["pickup_radius"] + 0.4
                         and abs(p["pos"][2] - pos[2]) <= 4.0):
                     take = p["id"]
-            elif w1 is not None and w1["kind"] in ("mortar", "laser"):
-                want = ("lightning",) if w1["kind"] == "laser" else ("lightning", "laser")
-                good = [p for p in cand if p["kind"] in want and dist3(pos, p["pos"]) < 14.0]
+            elif w1 is not None and w1["kind"] in ("mortar", "lightning"):
+                good = [p for p in cand if p["kind"] in ("laser", "lightning")
+                        and dist3(pos, p["pos"]) < 14.0]
                 if good:
                     good.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
                     take = good[0]["id"]
