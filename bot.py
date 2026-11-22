@@ -22,11 +22,11 @@ SQRT2 = math.sqrt(2.0)
 
 # Upgrade preference, best first.
 UPGRADE_PRIORITY = [
-    "plating", "armor", "gun_damage", "gun_rate", "laser_damage",
-    "laser_charge", "nanites", "gun_mag", "laser_pierce", "capacitor",
-    "reactor", "servos", "gyros", "sensors", "gun_velocity", "armor",
-    "lightning_efficiency", "lightning_chain", "lightning_range",
-    "mortar_reload", "mortar_splash", "mortar_velocity", "jets",
+    "plating", "armor", "lightning_efficiency", "lightning_chain",
+    "lightning_range", "gun_damage", "gun_rate", "capacitor", "reactor",
+    "nanites", "laser_damage", "laser_charge", "gun_mag", "laser_pierce",
+    "servos", "gyros", "sensors", "gun_velocity", "mortar_reload",
+    "mortar_splash", "mortar_velocity", "jets",
 ]
 
 
@@ -456,24 +456,24 @@ class Bot:
             mode = "fight"
             if low and td > 55.0 and target.get("hp", 1400.0) > me["hp"] * 0.8:
                 mode = "retreat"
-        elif npcs and me["hp"] > 0.8 * max_hp:
+        elif npcs and me["hp"] > 0.9 * max_hp and t > 15.0:
             n = min(npcs, key=lambda m: dist3(pos, m["pos"]))
-            if dist3(pos, n["pos"]) < 80.0:
+            if dist3(pos, n["pos"]) < 70.0 and not any(
+                    dist3(pos, p["pos"]) < 120.0 for p in obs["pickups"]):
                 mode = "npc"
                 goal = n["pos"]
                 self.npc_target = n
 
-        # weapon loot when slot 1 empty
-        if mode in ("zone", "npc") or (mode == "fight" and td > 140.0):
-            if me["weapons"][1] is None and obs["pickups"]:
-                pref = {"laser": 0, "lightning": 1, "mortar": 2}
-                cand = [p for p in obs["pickups"] if p["kind"] in pref and self._ground_reach(p["pos"])]
-                if cand:
-                    cand.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
-                    p = cand[0]
-                    if dist3(pos, p["pos"]) < 130.0:
-                        goal = p["pos"]
-                        mode = "loot"
+        # weapon loot: grab a second weapon early, lightning first
+        if me["weapons"][1] is None and obs["pickups"] and not outside:
+            pref = {"lightning": 0, "laser": 1, "mortar": 2}
+            cand = [p for p in obs["pickups"] if p["kind"] in pref and self._ground_reach(p["pos"])]
+            if cand:
+                cand.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
+                p = cand[0]
+                if dist3(pos, p["pos"]) < 160.0 and (target is None or td > 55.0 or t < 20.0):
+                    goal = p["pos"]
+                    mode = "loot"
 
         # crates early
         if mode == "zone" and obs["crates"] and me["hp"] > 0.5 * max_hp:
@@ -515,27 +515,53 @@ class Bot:
         move = [0.0, 0.0]
         if mode == "fight":
             dx, dy = unit(target["pos"][0] - pos[0], target["pos"][1] - pos[1])
-            # keep a mid-range distance and strafe
-            if t - self.strafe_t > 1.8 or any(e.get("type") == "damaged" for e in obs["events"]):
+            if t - self.strafe_t > 1.4:
                 self.strafe *= -1.0
                 self.strafe_t = t
             px, py = -dy * self.strafe, dx * self.strafe
-            t_hp = target.get("hp", 1400.0)
-            if t_hp < 380.0 and td > 40.0:
-                # finish the kill
-                move = [dx * 0.9 + px * 0.2, dy * 0.9 + py * 0.2]
-                boost = me["energy"] > 45.0
-            elif td < 55.0:
-                move = [(-dx * 0.75 + px * 0.65), (-dy * 0.75 + py * 0.65)]
-                boost = me["energy"] > 35.0
-            elif td > 165.0:
-                move = [dx, dy]
+            myk = set(w["kind"] for w in me["weapons"] if w)
+            ek = set(target.get("weapons") or [])
+            if "lightning" in myk:
+                if "mortar" in ek:
+                    lo, hi = (55.0, 100.0)
+                elif "lightning" in ek:
+                    lo, hi = (35.0, 70.0)
+                else:
+                    lo, hi = (16.0, 40.0)
+            elif "laser" in myk:
+                lo, hi = (70.0, 150.0) if "lightning" in ek else (60.0, 140.0)
             else:
-                move = [px * 0.9 + dx * 0.12, py * 0.9 + dy * 0.12]
-            if target.get("charging"):
-                # a laser is charging: slide out of the line of fire
-                move = [px * 1.0 + dx * 0.05, py * 1.0 + dy * 0.05]
-                boost = me["energy"] > 35.0
+                lo, hi = (28.0, 65.0)
+            t_hp = target.get("hp", 1400.0)
+            if t_hp < 320.0 and td > 28.0:
+                # finish the kill
+                move = [dx * 0.9 + px * 0.15, dy * 0.9 + py * 0.15]
+                boost = me["energy"] > 50.0 and "lightning" not in myk
+            elif td < lo:
+                move = [(-dx * 0.8 + px * 0.6), (-dy * 0.8 + py * 0.6)]
+            elif td > hi:
+                move = [dx * 0.85 + px * 0.35, dy * 0.85 + py * 0.35]
+                boost = me["energy"] > 55.0 and (td > 110.0 or "lightning" in myk)
+            else:
+                move = [px * 0.9 + dx * 0.1, py * 0.9 + dy * 0.1]
+            if target.get("charging") and "lightning" not in myk:
+                # a laser is charging: get behind cover if there is any
+                if td > 50.0:
+                    if t - self.cover_t > 1.0 or self.cover is None:
+                        self._find_cover(target["pos"], t)
+                    if self.cover and dist2(self.cover, nxt_c) < max(30.0, nxt_r * 0.9):
+                        move = self._move_toward(self.cover, 1.0)
+                        boost = me["energy"] > 20.0
+                    else:
+                        move = [px + dx * 0.05, py + dy * 0.05]
+                        boost = me["energy"] > 35.0
+                else:
+                    move = [px + dx * 0.05, py + dy * 0.05]
+                    boost = me["energy"] > 35.0
+            if outside or d_zone > nxt_r * 0.8:
+                zd = unit(nxt_c[0] - pos[0], nxt_c[1] - pos[1])
+                move = [move[0] + zd[0] * 0.9, move[1] + zd[1] * 0.9]
+                boost = me["energy"] > 30.0
         elif mode == "retreat":
             if t - self.cover_t > 1.5 or self.cover is None:
                 self._find_cover(target["pos"], t)
@@ -626,9 +652,9 @@ class Bot:
                 ch = w1.get("charge", 0.0)
                 full = w1["stats"].get("charge", 0.75)
                 if ch > 0.0:
-                    if not (ch >= full * 0.85 and ey < 0.05 and ep < 0.06):
+                    if not (ch >= full * 0.85 and ey < 0.03 and ep < 0.04):
                         fire1 = True
-                elif w1.get("cooldown", 0.0) <= 0.01 and ey < 0.06:
+                elif w1.get("cooldown", 0.0) <= 0.01 and ey < 0.035:
                     fire1 = True
                 if w0 and gaim and td < 70.0:
                     gy, gpch = self._aim_error(*gaim)
@@ -637,16 +663,17 @@ class Bot:
             elif primary == "lightning":
                 aim = center_aim
                 ey, ep = self._aim_error(*aim)
-                fire1 = ey < 0.32 and me["energy"] > 12.0
+                fire1 = ey < 0.32 and me["energy"] > 10.0
                 if w0 and gaim and td < 65.0:
                     gy, gpch = self._aim_error(*gaim)
                     if gy < 0.08 and gpch < 0.07:
+                        aim = gaim
                         fire0 = True
             else:
                 if w0 and gaim:
                     aim = gaim
                     gy, gpch = self._aim_error(*aim)
-                    if td < w0["stats"].get("range", 230.0) * 0.95 and gy < 0.055 and gpch < 0.05:
+                    if td < w0["stats"].get("range", 230.0) * 0.95 and gy < 0.03 and gpch < 0.03:
                         fire0 = True
         elif mode == "crate" and goal:
             ey, ep = self._aim_error(*aim)
@@ -663,9 +690,9 @@ class Bot:
         if w0 and w0.get("ammo", 1) <= 1 and w0.get("reload", 0) == 0:
             reload = True
 
-        # weapon pickup / swap
+        # weapon pickup / swap: lightning is the anti-laser brawler
         if obs["pickups"]:
-            pref = {"laser": 0, "lightning": 1, "mortar": 2}
+            pref = {"lightning": 0, "laser": 1, "mortar": 2}
             cand = [p for p in obs["pickups"] if p["kind"] in pref and self._ground_reach(p["pos"])]
             if w1 is None and cand:
                 cand.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
@@ -673,9 +700,9 @@ class Bot:
                 if (dist2(pos, p["pos"]) <= self.loot_cfg["pickup_radius"] + 0.4
                         and abs(p["pos"][2] - pos[2]) <= 4.0):
                     take = p["id"]
-            elif w1 is not None and w1["kind"] == "mortar":
-                good = [p for p in cand if p["kind"] in ("laser", "lightning")
-                        and dist3(pos, p["pos"]) < 14.0]
+            elif w1 is not None and w1["kind"] in ("mortar", "laser"):
+                want = ("lightning",) if w1["kind"] == "laser" else ("lightning", "laser")
+                good = [p for p in cand if p["kind"] in want and dist3(pos, p["pos"]) < 14.0]
                 if good:
                     good.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
                     take = good[0]["id"]
