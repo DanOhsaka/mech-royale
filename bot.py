@@ -298,6 +298,7 @@ class Bot:
         self.laser_hold = False
         self.cover = None
         self.cover_t = -9.0
+        self.npc_target = None
         self.upgrade_ids = {u["id"]: u for u in self.c.get("upgrades", [])}
 
     # ---------- helpers ----------
@@ -411,6 +412,12 @@ class Bot:
         self.cover_t = t
         return self.cover
 
+    def _ground_reach(self, p):
+        """True if loot is close enough to the walkable ground to collect."""
+        if not self.world.ok:
+            return True
+        return p[2] - self.world.ground(p[0], p[1]) <= 2.6
+
     # ---------- main ----------
     def act(self, obs: mf.Observation) -> mf.Action:
         self.obs = obs
@@ -425,10 +432,16 @@ class Bot:
         # ----- threat assessment -----
         enemies = [m for m in obs["mechs"] if m["kind"] == "mech"]
         npcs = [m for m in obs["mechs"] if m["kind"] == "npc"]
-        enemies.sort(key=lambda m: dist3(pos, m["pos"]))
+
+        def threat_key(m):
+            d = dist3(pos, m["pos"])
+            hp = m.get("hp", 1400.0)
+            return d - min(90.0, max(0.0, 1400.0 - hp) * 0.11)
+
+        enemies.sort(key=threat_key)
         target = enemies[0] if enemies else None
         td = dist3(pos, target["pos"]) if target else 1e9
-        low = me["hp"] < 0.38 * max_hp
+        low = me["hp"] < 0.42 * max_hp
 
         zone_c, zone_r, nxt_c, nxt_r = self._effective_zone(obs)
         d_zone = dist2(pos, nxt_c)
@@ -441,19 +454,20 @@ class Bot:
         goal = nxt_c
         if target and td < 170.0:
             mode = "fight"
-            if low and td > 45.0:
+            if low and td > 55.0 and target.get("hp", 1400.0) > me["hp"] * 0.8:
                 mode = "retreat"
         elif npcs and me["hp"] > 0.8 * max_hp:
             n = min(npcs, key=lambda m: dist3(pos, m["pos"]))
             if dist3(pos, n["pos"]) < 80.0:
                 mode = "npc"
                 goal = n["pos"]
+                self.npc_target = n
 
         # weapon loot when slot 1 empty
         if mode in ("zone", "npc") or (mode == "fight" and td > 140.0):
             if me["weapons"][1] is None and obs["pickups"]:
                 pref = {"laser": 0, "lightning": 1, "mortar": 2}
-                cand = [p for p in obs["pickups"] if p["kind"] in pref]
+                cand = [p for p in obs["pickups"] if p["kind"] in pref and self._ground_reach(p["pos"])]
                 if cand:
                     cand.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
                     p = cand[0]
@@ -463,19 +477,32 @@ class Bot:
 
         # crates early
         if mode == "zone" and obs["crates"] and me["hp"] > 0.5 * max_hp:
-            cs = sorted(obs["crates"], key=lambda c: dist3(pos, c["pos"]))
-            c = cs[0]
-            if dist3(pos, c["pos"]) < 45.0:
-                mode = "crate"
-                goal = c["pos"]
+            cs = sorted((c for c in obs["crates"] if self._ground_reach(c["pos"])),
+                        key=lambda c: dist3(pos, c["pos"]))
+            if cs:
+                c = cs[0]
+                if dist3(pos, c["pos"]) < 45.0:
+                    mode = "crate"
+                    goal = c["pos"]
 
         # cubes within reach
         if mode in ("zone", "loot") and obs["cubes"]:
-            cb = sorted(obs["cubes"], key=lambda c: dist3(pos, c["pos"]))
-            c = cb[0]
-            if dist3(pos, c["pos"]) < 22.0:
-                goal = c["pos"]
-                mode = "cube"
+            cb = sorted((c for c in obs["cubes"] if self._ground_reach(c["pos"])),
+                        key=lambda c: dist3(pos, c["pos"]))
+            if cb:
+                c = cb[0]
+                if dist3(pos, c["pos"]) < 22.0:
+                    goal = c["pos"]
+                    mode = "cube"
+
+        # supply drop when safe
+        drops_now = [d for d in (obs.get("drops") or [])
+                     if d.get("lands_in", 1.0) <= 0.0 and d.get("holder") is None]
+        if drops_now and mode in ("zone", "loot", "cube", "crate") and (target is None or td > 170.0):
+            d = min(drops_now, key=lambda d: dist2(pos, d["pos"]))
+            if dist2(pos, d["pos"]) < 140.0 and not any(dist3(pos, e["pos"]) < 55.0 for e in enemies):
+                mode = "drop"
+                goal = d["pos"]
 
         # zone outranks looting when the next circle is far
         if rotate_now and mode in ("loot", "crate", "cube", "npc"):
@@ -493,15 +520,22 @@ class Bot:
                 self.strafe *= -1.0
                 self.strafe_t = t
             px, py = -dy * self.strafe, dx * self.strafe
-            if td < 55.0:
+            t_hp = target.get("hp", 1400.0)
+            if t_hp < 380.0 and td > 40.0:
+                # finish the kill
+                move = [dx * 0.9 + px * 0.2, dy * 0.9 + py * 0.2]
+                boost = me["energy"] > 45.0
+            elif td < 55.0:
                 move = [(-dx * 0.75 + px * 0.65), (-dy * 0.75 + py * 0.65)]
                 boost = me["energy"] > 35.0
             elif td > 165.0:
                 move = [dx, dy]
             else:
                 move = [px * 0.9 + dx * 0.12, py * 0.9 + dy * 0.12]
-            if me["weapons"][1] and me["weapons"][1]["kind"] == "laser" and me["weapons"][1].get("charge", 0) > 0:
-                move = [v * 0.5 for v in move]
+            if target.get("charging"):
+                # a laser is charging: slide out of the line of fire
+                move = [px * 1.0 + dx * 0.05, py * 1.0 + dy * 0.05]
+                boost = me["energy"] > 35.0
         elif mode == "retreat":
             if t - self.cover_t > 1.5 or self.cover is None:
                 self._find_cover(target["pos"], t)
@@ -511,9 +545,12 @@ class Bot:
         else:
             self._update_path(goal, t)
             goalp = self._next_waypoint(goal)
-            if dist2(pos, goalp) > 5.0:
+            if mode == "drop" and dist2(pos, goal) < 4.0:
+                move = [0.0, 0.0]
+                boost = False
+            elif dist2(pos, goalp) > 5.0:
                 move = self._move_toward(goalp, speed)
-            boost = me["energy"] > 55.0 and (outside or d_zone > 130.0)
+            boost = me["energy"] > 55.0 and (outside or d_zone > 130.0) and mode != "drop"
 
         # zone override: never stand outside
         if outside:
@@ -568,64 +605,81 @@ class Bot:
         fire0 = fire1 = False
         reload = False
         take = None
+        drop_slot = None
         w0, w1 = me["weapons"][0], me["weapons"][1]
         if target and los:
-            err_y, err_p = self._aim_error(*aim)
+            scale = 1.0 + 0.05 * (target.get("cubes", 0) or 0)
+            center = [target["pos"][0], target["pos"][1], target["pos"][2] + 4.5 * scale]
+            center_aim = self._aim_at(center)
+            gaim = None
             if w0 and w0["kind"] == "gun":
                 gp, _ = self._gun_intercept(target)
                 gaim = self._aim_at(gp)
-                gerr_y, gerr_p = self._aim_error(*gaim)
-                if td < w0["stats"].get("range", 230) * 0.95 and gerr_y < 0.055 and gerr_p < 0.05:
-                    aim = gaim
-                    fire0 = True
-                if w0.get("ammo", 1) <= 1 and w0.get("reload", 0) == 0:
-                    reload = True
-            if w1 and w1["kind"] == "laser":
+            primary = "gun"
+            if w1 and w1["kind"] == "laser" and td < w1["stats"].get("range", 280.0) * 0.9:
+                primary = "laser"
+            elif w1 and w1["kind"] == "lightning" and td < w1["stats"].get("range", 45.0) * 0.95:
+                primary = "lightning"
+            if primary == "laser":
+                aim = center_aim
+                ey, ep = self._aim_error(*aim)
                 ch = w1.get("charge", 0.0)
                 full = w1["stats"].get("charge", 0.75)
                 if ch > 0.0:
-                    self.laser_hold = True
-                    if ch >= full * 0.85 and err_y < 0.035 and err_p < 0.05:
-                        self.laser_hold = False
-                        fire1 = False
-                    else:
+                    if not (ch >= full * 0.85 and ey < 0.05 and ep < 0.06):
                         fire1 = True
-                elif w1.get("cooldown", 0) <= 0.01 and td < w1["stats"].get("range", 280) * 0.9 and err_y < 0.05:
-                    self.laser_hold = True
+                elif w1.get("cooldown", 0.0) <= 0.01 and ey < 0.06:
                     fire1 = True
-            elif w1 and w1["kind"] == "lightning":
-                if td < w1["stats"].get("range", 45) * 0.9 and err_y < 0.28 and me["energy"] > 12:
-                    fire1 = True
-            elif w1 and w1["kind"] == "mortar" and td > 35.0 and td < 180.0:
-                if err_y < 0.25:
-                    fire1 = True
+                if w0 and gaim and td < 70.0:
+                    gy, gpch = self._aim_error(*gaim)
+                    if gy < 0.08 and gpch < 0.07:
+                        fire0 = True
+            elif primary == "lightning":
+                aim = center_aim
+                ey, ep = self._aim_error(*aim)
+                fire1 = ey < 0.32 and me["energy"] > 12.0
+                if w0 and gaim and td < 65.0:
+                    gy, gpch = self._aim_error(*gaim)
+                    if gy < 0.08 and gpch < 0.07:
+                        fire0 = True
+            else:
+                if w0 and gaim:
+                    aim = gaim
+                    gy, gpch = self._aim_error(*aim)
+                    if td < w0["stats"].get("range", 230.0) * 0.95 and gy < 0.055 and gpch < 0.05:
+                        fire0 = True
         elif mode == "crate" and goal:
-            err_y, err_p = self._aim_error(*aim)
-            if err_y < 0.06 and err_p < 0.05:
+            ey, ep = self._aim_error(*aim)
+            if ey < 0.06 and ep < 0.05:
                 fire0 = True
-                if w0 and w0.get("ammo", 1) <= 1 and w0.get("reload", 0) == 0:
-                    reload = True
-        elif mode == "npc" and goal:
+        elif mode == "npc" and goal and self.npc_target:
             if w0:
-                gp, _ = self._gun_intercept({"pos": goal, "vel": [0, 0, 0]})
+                gp, _ = self._gun_intercept(self.npc_target)
                 gaim = self._aim_at(gp)
-                gerr_y, gerr_p = self._aim_error(*gaim)
-                if gerr_y < 0.07 and gerr_p < 0.06:
+                ey, ep = self._aim_error(*gaim)
+                if ey < 0.07 and ep < 0.06:
                     aim = gaim
                     fire0 = True
-                    if w0.get("ammo", 1) <= 1 and w0.get("reload", 0) == 0:
-                        reload = True
+        if w0 and w0.get("ammo", 1) <= 1 and w0.get("reload", 0) == 0:
+            reload = True
 
-        # weapon pickup if close
-        if w1 is None and obs["pickups"]:
+        # weapon pickup / swap
+        if obs["pickups"]:
             pref = {"laser": 0, "lightning": 1, "mortar": 2}
-            cand = [p for p in obs["pickups"] if p["kind"] in pref]
-            if cand:
+            cand = [p for p in obs["pickups"] if p["kind"] in pref and self._ground_reach(p["pos"])]
+            if w1 is None and cand:
                 cand.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
                 p = cand[0]
-                if (dist2(pos, p["pos"]) <= self.loot_cfg["pickup_radius"] + 0.5
+                if (dist2(pos, p["pos"]) <= self.loot_cfg["pickup_radius"] + 0.4
                         and abs(p["pos"][2] - pos[2]) <= 4.0):
                     take = p["id"]
+            elif w1 is not None and w1["kind"] == "mortar":
+                good = [p for p in cand if p["kind"] in ("laser", "lightning")
+                        and dist3(pos, p["pos"]) < 14.0]
+                if good:
+                    good.sort(key=lambda p: (pref[p["kind"]], dist3(pos, p["pos"])))
+                    take = good[0]["id"]
+                    drop_slot = 1
 
         act.update(move=move, boost=bool(boost), jump=bool(jump), aim=[float(aim[0]), float(aim[1])],
                    fire=[fire0, fire1])
@@ -633,6 +687,8 @@ class Bot:
             act["reload"] = True
         if take is not None:
             act["take"] = take
+        if drop_slot is not None:
+            act["drop"] = drop_slot
 
         # debug label
         mf.draw.label(f"{mode} hp{me['hp']:.0f} c{me['cubes']:.0f}"
