@@ -647,24 +647,24 @@ class Bot:
             elif w1 and w1["kind"] == "lightning" and td < w1["stats"].get("range", 45.0) * 0.95:
                 primary = "lightning"
             if primary == "laser":
-                aim = center_aim
+                aim = self._aim_at(center, lead=0.08, target_vel=target.get("vel"))
                 ey, ep = self._aim_error(*aim)
                 ch = w1.get("charge", 0.0)
                 full = w1["stats"].get("charge", 0.75)
                 if ch > 0.0:
-                    if not (ch >= full * 0.85 and ey < 0.03 and ep < 0.04):
+                    if not (ch >= full * 0.85 and ey < 0.02 and ep < 0.03):
                         fire1 = True
-                elif w1.get("cooldown", 0.0) <= 0.01 and ey < 0.035:
+                elif w1.get("cooldown", 0.0) <= 0.01 and ey < 0.03:
                     fire1 = True
-                if w0 and gaim and td < 70.0:
+                if w0 and gaim and td < 65.0:
                     gy, gpch = self._aim_error(*gaim)
                     if gy < 0.08 and gpch < 0.07:
                         fire0 = True
             elif primary == "lightning":
-                aim = center_aim
+                aim = self._aim_at(center, lead=0.05, target_vel=target.get("vel"))
                 ey, ep = self._aim_error(*aim)
                 fire1 = ey < 0.32 and me["energy"] > 10.0
-                if w0 and gaim and td < 65.0:
+                if w0 and gaim and td < 60.0:
                     gy, gpch = self._aim_error(*gaim)
                     if gy < 0.08 and gpch < 0.07:
                         aim = gaim
@@ -673,7 +673,7 @@ class Bot:
                 if w0 and gaim:
                     aim = gaim
                     gy, gpch = self._aim_error(*aim)
-                    if td < w0["stats"].get("range", 230.0) * 0.95 and gy < 0.03 and gpch < 0.03:
+                    if td < 75.0 and gy < 0.03 and gpch < 0.03:
                         fire0 = True
         elif mode == "crate" and goal:
             ey, ep = self._aim_error(*aim)
