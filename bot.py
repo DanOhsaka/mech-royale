@@ -412,6 +412,26 @@ class Bot:
         self.cover_t = t
         return self.cover
 
+    def _nearest_cover(self, threat, maxr=14.0):
+        """Closest walkable point whose line to the threat is blocked."""
+        if not self.world.ok:
+            return None
+        me = self.self_obs["pos"]
+        for r in (4.0, 7.0, 10.0, maxr):
+            best = None
+            for ang in range(0, 360, 30):
+                a = math.radians(ang)
+                p = (me[0] + math.cos(a) * r, me[1] + math.sin(a) * r)
+                if not self.world.walkable(*p):
+                    continue
+                if not self.world.line_clear(p, threat):
+                    d = dist2(me, p)
+                    if best is None or d < best[0]:
+                        best = (d, p)
+            if best:
+                return best[1]
+        return None
+
     def _ground_reach(self, p):
         """True if loot is close enough to the walkable ground to collect."""
         if not self.world.ok:
@@ -539,20 +559,21 @@ class Bot:
                 boost = me["energy"] > 55.0 and (td > 110.0 or "lightning" in myk)
             else:
                 move = [px * 0.9 + dx * 0.1, py * 0.9 + dy * 0.1]
-            if target.get("charging") and "lightning" not in myk:
-                # a laser is charging: get behind cover if there is any
-                if td > 50.0:
-                    if t - self.cover_t > 1.0 or self.cover is None:
-                        self._find_cover(target["pos"], t)
-                    if self.cover and dist2(self.cover, nxt_c) < max(30.0, nxt_r * 0.9):
-                        move = self._move_toward(self.cover, 1.0)
-                        boost = me["energy"] > 20.0
-                    else:
-                        move = [px + dx * 0.05, py + dy * 0.05]
-                        boost = me["energy"] > 35.0
+            if target.get("charging"):
+                # laser charging: duck behind the nearest wall, not a distant one
+                cov = self._nearest_cover(target["pos"], 14.0)
+                if cov:
+                    move = self._move_toward(cov, 1.0)
+                    boost = me["energy"] > 20.0
                 else:
                     move = [px + dx * 0.05, py + dy * 0.05]
                     boost = me["energy"] > 35.0
+            elif me["hp"] < 0.6 * max_hp and td > 70.0:
+                # hurt and not in lightning range: break the laser line
+                cov = self._nearest_cover(target["pos"], 16.0)
+                if cov:
+                    move = self._move_toward(cov, 1.0)
+                    boost = me["energy"] > 25.0
             if outside or d_zone > nxt_r * 0.8:
                 zd = unit(nxt_c[0] - pos[0], nxt_c[1] - pos[1])
                 move = [move[0] + zd[0] * 0.9, move[1] + zd[1] * 0.9]
