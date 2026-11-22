@@ -21,7 +21,7 @@ TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:140,armgo,armd:100,pickd:240,pickd2:160,"
                                       "prefl:180,prefg:140,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
                                       "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,"
-                                      "nano,cube10,fboost,leadk:0.8,pocket,peek2,zlate,duel,lead2,hitfb,precharge,cdwin,zapamb,jink,hitflip,hunt").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "nano,cube10,fboost,leadk:0.8,pocket,peek2,zlate,duel,lead2,hitfb,precharge,cdwin,zapamb,jink,hitflip,hunt,finaltank").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -392,6 +392,8 @@ class Bot:
         self.peek_tick, self.peek_cover, self.peek_from, self.peek_t = -99, None, None, -99.0
         self.last_enemy = None  # (t, (x, y)) of the nearest enemy last seen
         self.perch, self.perch_until, self.perch_climb = None, 0.0, None
+        self.tank_center, self.tank_top, self.tank_ground = None, None, None
+        self.tank_on_roof = False
         self.roofs = self._roofs() if self.world.ok else []
         self.pocket_cur, self.pocket_until = None, 0.0
         self.arms = (0.6, 1.0, 1.3)  # hitfb: lead-scale candidates, picked by the gun hit rate seen in this match
@@ -789,6 +791,20 @@ class Bot:
 
         zs = self._zone_state(obs, pos)
         self._update_memory(obs, pos, eye)
+
+        # finaltank: the final center is revealed one phase ahead (next_radius 0). If a
+        # climbable prism roof covers that exact point, latch it and hold it through r=0.
+        if "finaltank" in self.flags and self.tank_center is None:
+            zn = obs["zone"]
+            if zn.get("next_radius", 1.0) == 0:
+                tc = zn["next_center"]
+                tr = self._find_tank_roof(tc[0], tc[1])
+                if tr is not None:
+                    self.tank_center = (tc[0], tc[1])
+                    self.tank_top = tr[2]
+                    self.tank_ground = tr[3]
+                    log("finaltank: center (%.1f, %.1f) roof %.1f ground %.1f t=%.1f"
+                        % (tc[0], tc[1], tr[2], tr[3], t))
 
         # ---- enemies
         enemies = []
@@ -1316,6 +1332,31 @@ class Bot:
             if math.dist(goal, zs["nc"]) > zs["nr"]:
                 goal = zs["nc"]
 
+        # finaltank: override the zone/cover/fight goal and hold the roof over the final center
+        if "finaltank" in self.flags and self.tank_center is not None:
+            tx, ty = self.tank_center
+            d_tank = math.hypot(tx - x, ty - y)
+            c_here = self.world.cell(x, y) if self.world.ok else -1
+            top_here = self.world.top[c_here] if c_here >= 0 else -1e9
+            on_roof = (z >= self.tank_top - 1.6 and abs(top_here - self.tank_top) < 1.0
+                       and d_tank < 60.0)
+            if on_roof and not self.tank_on_roof:
+                log("finaltank: on roof z=%.1f d=%.1f t=%.1f" % (z, d_tank, t))
+            self.tank_on_roof = on_roof
+            mode = "finaltank"
+            self.mode = mode
+            goal = (tx, ty)
+            if on_roof:
+                self.climb_until = 0.0
+                self.perch_climb = None
+                boost = False
+            elif (d_tank < 34.0 or
+                  (self.world.ok and self.world.blocked(
+                      x + (tx - x) / max(d_tank, 1.0) * 6.0,
+                      y + (ty - y) / max(d_tank, 1.0) * 6.0, z, 6.0))) and \
+                    me["energy"] > min(95.0, (self.tank_top - z) * 1.7 + 15.0):
+                self.climb_until = max(self.climb_until, t + 0.6)
+
         # ---- progress watchdog (jitter in a pocket does not trip the speed-based stuck check)
         if self.tick_n % 25 == 0:
             if self.prog_pos is not None and goal is not None and mode in ("zone", "loot", "cube", "roam", "cover") \
@@ -1403,7 +1444,7 @@ class Bot:
 
         # stuck detection
         hs = math.hypot(me["vel"][0], me["vel"][1])
-        if math.hypot(*move) > 0.3 and hs < 2.5 and me["grounded"]:
+        if math.hypot(*move) > 0.3 and hs < 2.5 and me["grounded"] and not self.tank_on_roof:
             self.stuck_t += 0.1
         else:
             self.stuck_t = max(0.0, self.stuck_t - 0.05)
@@ -1431,6 +1472,22 @@ class Bot:
 
         if boost and me["grounded"] and me["energy"] < 20:
             boost = False
+
+        # finaltank hold: creep to the exact final-center x,y on the roof and stay there;
+        # at r=0 every metre of offset costs ~260 HP/s, while the house bots die to the zone.
+        if self.tank_on_roof and self.tank_center is not None:
+            tx, ty = self.tank_center
+            ddx, ddy = tx - x, ty - y
+            gd = math.hypot(ddx, ddy)
+            walk = max(1.0, st.get("walk_speed", 11.7))
+            if gd > 0.04:
+                v = min(1.6, gd * 2.0)  # low-speed proportional approach, no overshoot
+                move = [ddx / gd * (v / walk), ddy / gd * (v / walk)]
+            else:
+                move = [0.0, 0.0]
+            boost = False
+            jump = False
+            self.climb_until = 0.0
 
         act["move"] = move
         act["aim"] = [wrap(aim_yaw), max(-0.69, min(1.29, aim_pitch))]
@@ -1552,6 +1609,30 @@ class Bot:
                 best, bd = r, d
         self.perch, self.perch_until = best, t + 30.0
         return best
+
+    def _find_tank_roof(self, cx, cy):
+        """A climbable prism roof covering the exact final-zone center, or None.
+
+        Uses the rasterized top/base grids: top is the highest prism top over the 2 m
+        cell, base the lowest prism base. A tank roof must sit 8-55 m above the ground,
+        start at ground level (base <= ground+1), and actually cover the center cell
+        (top set). Bridges and rooftops of stacked prisms are excluded by the base check.
+        """
+        w = self.world
+        if not w.ok:
+            return None
+        c = w.cell(cx, cy)
+        if c < 0:
+            return None
+        top = w.top[c]
+        if top < -1e8:
+            return None
+        g = w.ground(cx, cy)
+        if not (8.0 <= top - g <= 55.0):
+            return None
+        if w.base[c] > g + 1.0:
+            return None
+        return (cx, cy, top, g)
 
     def _build_pockets(self):
         """Sample nav cells and keep those with at most 5 of 16 open sight directions (done once per process)."""
