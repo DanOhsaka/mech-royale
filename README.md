@@ -2,17 +2,24 @@
 
 Autonomous mech controller for the Builders Buildathon Mech Royale track.
 
-## What it is
+## Basis and credits
 
-A bot that speaks `mechfight/1` over stdin/stdout: it reads observations 10 times per match-second and returns movement, aim, and weapon decisions. It is built on the official starter wrapper (`mechfight.py`, included) and the official map files are mounted at `/arena` during matches.
+This bot is adapted from the open-source controller **`LanceHuang245/mech-royale`**
+(MIT license), with changes by **ZeroByte / Chukwuebuka Umeh**. It also uses the
+official Builders `mechfight-kit` Python wrapper (`mechfight.py`, MIT). The
+original copyright notices are retained in `LICENSE`.
+
+Changes in this fork are tracked in the git history. Current changes:
+
+- `/arena` fallback when the conformance checker rewrites `hello.map.dir` with
+  host path rules.
+- Tuning and evaluation work by ZeroByte.
 
 ## Run locally
 
 ```sh
-python check/check.py -- python -u bot.py
+python check/check.py --map-dir /path/to/mechfight-kit/arena -- python -u bot.py
 ```
-
-(From a checkout of the official `mechfight-kit`, pointing at this file.)
 
 ## Docker
 
@@ -20,9 +27,9 @@ python check/check.py -- python -u bot.py
 docker build -t zerobyte-bot .
 docker run --rm -i --network none --cpus 1 --memory 512m --read-only \
   --tmpfs /tmp:rw,size=64m --user 65534:65534 \
-  -v "$PWD/../arena:/arena:ro" zerobyte-bot
+  -v "/path/to/mechfight-kit/arena:/arena:ro" zerobyte-bot
 ```
 
-## Credits
+## License
 
-Starter wrapper and protocol kit: Builders Buildathon (`mechfight-kit`), MIT licensed. Bot logic: ZeroByte.
+MIT. See `LICENSE` for the original and fork copyright notices.
